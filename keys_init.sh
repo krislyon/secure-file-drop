@@ -8,17 +8,17 @@ CN="${2:-Offline CMS Recipient}" # certificate subject CN
 prompt_passphrase() {
   local pass1 pass2
   while true; do
-    read -rsp "Enter passphrase for new private key (leave blank for none): " pass1
-    echo
-    read -rsp "Confirm passphrase: " pass2
-    echo
-    if [[ "${pass1}" != "${pass2}" ]]; then
-      echo "Passphrases did not match; please try again." >&2
-      continue
-    fi
+  read -rsp "Enter passphrase for new private key (leave blank for none): " pass1
+  echo
+  read -rsp "Confirm passphrase: " pass2
+  echo
+  if [[ "${pass1}" != "${pass2}" ]]; then
+    echo "Passphrases did not match; please try again." >&2
+    continue
+  fi
 
-    PASSPHRASE="${pass1}"
-    return
+  PASSPHRASE="${pass1}"
+  return
   done
 }
 

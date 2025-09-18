@@ -51,6 +51,12 @@ cache_passphrase() {
     return
   fi
 
+  if [[ -v DECRYPT_WATCH_PASSPHRASE ]]; then
+    PASSIN_OPT="env:DECRYPT_WATCH_PASSPHRASE"
+    log "[pass] Using private key passphrase from environment variable."
+    return
+  fi
+
   if [[ ! -t 0 ]]; then
     error "[pass] PASSIN_OPT=ask but no TTY available to prompt for passphrase."
     error "[pass] Provide PASSIN_OPT (e.g. env:VAR, file:/path) or run interactively."

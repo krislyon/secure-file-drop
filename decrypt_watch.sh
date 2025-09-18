@@ -89,7 +89,7 @@ validate_private_key() {
     error "[pass] Private key ${PRIVKEY_PK8} is missing or unreadable"
     exit 1
   fi
-  if ! openssl pkcs8 -in "$PRIVKEY_PK8" -passin "$PASSIN_OPT" -nocrypt -out /dev/null 2>/dev/null; then
+  if ! openssl pkcs8 -topk8 -in "$PRIVKEY_PK8" -passin "$PASSIN_OPT" -nocrypt -out /dev/null 2>/dev/null; then
     error "[pass] Unable to unlock private key with provided passphrase (${PRIVKEY_PK8})."
     exit 1
   fi

@@ -119,6 +119,7 @@ decrypt_one() {
   then
     mv -f -- "$tmp" "$out"
     log "[decrypt] ✅ OK → ${out}"
+    log "[decrypt] 🔐 md5sum $(md5sum -- "$out")"
     mv -f -- "$cms" "${PROCESSED_DIR}/${base}"
   else
     rm -f -- "$tmp" || true

@@ -13,12 +13,102 @@ PASSIN_OPT="${PASSIN_OPT:-ask}"                 # how to supply pass (ask|fd:3|p
 # Polling interval (seconds) if inotifywait not available
 POLL_SEC="${POLL_SEC:-2}"
 
-mkdir -p "$WATCH_DIR" "$OUT_DIR" "$PROCESSED_DIR" "$ERROR_DIR"
-chmod 700 "$OUT_DIR" "$PROCESSED_DIR" "$ERROR_DIR"
-
 log()   { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
 warn()  { log "WARN: $*"; }
 error() { log "ERR: $*"; }
+
+mkdir -p "$WATCH_DIR" "$OUT_DIR" "$PROCESSED_DIR" "$ERROR_DIR"
+
+PRIVATE_KEY_VALIDATED=0
+
+ensure_private_dir() {
+  local dir="$1" mode="$2" label="$3"
+
+  if [[ -z "$dir" ]]; then
+    return
+  fi
+
+  # Try to enforce restrictive permissions, but don't abort if we are not the
+  # owner (e.g. when the directories were provisioned by root via
+  # create_layout.sh). Services running as an unprivileged user still need to
+  # proceed even if they cannot chmod the directory themselves.
+  if chmod "$mode" "$dir" 2>/dev/null; then
+    return
+  fi
+
+  local owner
+  owner=$(stat -c '%U:%G' "$dir" 2>/dev/null || echo 'unknown')
+  warn "[perm] Unable to set ${label:-$dir} permissions to ${mode}; current owner ${owner}. Continuing with existing permissions."
+}
+
+ensure_private_dir "$OUT_DIR" 700 "outbox"
+ensure_private_dir "$PROCESSED_DIR" 700 "processed"
+ensure_private_dir "$ERROR_DIR" 700 "error"
+
+cache_passphrase() {
+  # Cache the private key passphrase at startup so we don't get prompted for
+  # every file processed. If PASSIN_OPT is already set to something other than
+  # "ask", respect it.
+  if [[ "${PASSIN_OPT}" != "ask" ]]; then
+    return
+  fi
+
+  if [[ ! -t 0 ]]; then
+    error "[pass] PASSIN_OPT=ask but no TTY available to prompt for passphrase."
+    error "[pass] Provide PASSIN_OPT (e.g. env:VAR, file:/path) or run interactively."
+    exit 1
+  fi
+
+  PASSIN_OPT="env:DECRYPT_WATCH_PASSPHRASE"
+  trap 'unset -v DECRYPT_WATCH_PASSPHRASE' EXIT
+
+  while true; do
+    local passphrase
+    read -r -s -p "Enter passphrase for private key (${PRIVKEY_PK8}) (leave blank if none): " passphrase || {
+      echo
+      error "[pass] Unable to read passphrase from terminal."
+      exit 1
+    }
+    echo
+
+    # Keep the passphrase only in memory (environment). It will be cleared when
+    # the watcher exits via the trap set above.
+    export DECRYPT_WATCH_PASSPHRASE="$passphrase"
+
+    if validate_private_key; then
+      PRIVATE_KEY_VALIDATED=1
+      if [[ -n "$passphrase" ]]; then
+        log "[pass] Cached private key passphrase from terminal."
+      else
+        log "[pass] Using empty passphrase for private key."
+      fi
+      break
+    fi
+
+    unset -v DECRYPT_WATCH_PASSPHRASE
+    warn "[pass] Invalid passphrase; please try again."
+  done
+}
+
+validate_private_key() {
+  local -a base_args=(-in "$PRIVKEY_PK8" -passin "$PASSIN_OPT" -nocrypt -out /dev/null)
+
+  if openssl pkcs8 "${base_args[@]}" 2>/dev/null; then
+    return 0
+  fi
+
+  if openssl pkcs8 -inform DER "${base_args[@]}" 2>/dev/null; then
+    return 0
+  fi
+
+  error "[pass] Unable to unlock private key with provided passphrase (${PRIVKEY_PK8})."
+  return 1
+}
+
+cache_passphrase
+if (( PRIVATE_KEY_VALIDATED == 0 )) && ! validate_private_key; then
+  exit 1
+fi
 
 decrypt_one() {
   local cms="$1"

@@ -1,0 +1,36 @@
+{
+    "_credit": "This sample JSON file is provided by Sample-Files.com. Visit us for more sample files and resources.",
+    "project": "Sample JSON",
+    "version": 1.0,
+    "isActive": true,
+    "contributors": [
+        {
+            "id": 1,
+            "name": "Alice",
+            "roles": [
+                "developer",
+                "tester"
+            ]
+        },
+        {
+            "id": 2,
+            "name": "Bob",
+            "roles": [
+                "manager"
+            ]
+        }
+    ],
+    "metadata": {
+        "created": "2023-01-01T12:00:00Z",
+        "tags": [
+            "sample",
+            "json",
+            "complex"
+        ],
+        "stats": {
+            "downloads": 1234,
+            "likes": 98,
+            "comments": null
+        }
+    }
+}

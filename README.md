@@ -16,6 +16,7 @@ exchange files without standing up a heavyweight service.
 
 ```text
 .
+├── encrypt_file.js    # JavaScript example that crafts CMS envelopes directly
 ├── encrypt_file.sh    # Encrypt files for the secure inbox
 ├── decrypt_watch.sh   # Continuously decrypt new CMS envelopes
 ├── init_keys.sh       # Create RSA keys and a self-signed certificate
@@ -85,6 +86,16 @@ exchange files without standing up a heavyweight service.
    The script produces a DER-formatted CMS envelope using AES-256-GCM and the
    recipient's RSA certificate. The resulting `.cms` file can be dropped into
    the inbox for decryption.
+
+  Prefer JavaScript? A Node.js port that assembles the CMS structure directly
+  with the standard `crypto` library is provided in `encrypt_file.js`:
+
+   ```bash
+   node encrypt_file.js \
+     -r /path/to/recipient_cert.pem \
+     -i secret.pdf \
+     -o secret.pdf.cms
+   ```
 
 ## Configuring `decrypt_watch.sh`
 

@@ -3,15 +3,12 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") -r /path/to/recipient_cert.pem -i INPUT -o OUTPUT
-Encrypt INPUT into CMS (DER) using AES-256-GCM and RSA recipient.
+Usage: $(basename "$0") -r /path/to/recipient_pub.json -i INPUT -o OUTPUT
+Encrypt INPUT into an SFD PQC envelope using AES-256-GCM and an LWE-based KEM.
 Options:
-  -r  Recipient certificate (PEM, contains RSA public key)
+  -r  Recipient public key (JSON)
   -i  Input file (to encrypt)
-  -o  Output CMS file (e.g., file.cms)
-Notes:
-  * Uses: openssl cms -encrypt -aes-256-gcm -inform/outform DER
-  * Does NOT log secrets. Filenames only.
+  -o  Output envelope file (e.g., file.cms)
 EOF
 }
 
@@ -29,22 +26,8 @@ while getopts ":r:i:o:h" opt; do
   esac
 done
 
-[ -n "${RECIP}" ] && [ -f "${RECIP}" ] || { echo "ERR: recipient cert missing"; exit 2; }
+[ -n "${RECIP}" ] && [ -f "${RECIP}" ] || { echo "ERR: recipient key missing"; exit 2; }
 [ -n "${IN}" ] && [ -f "${IN}" ] || { echo "ERR: input file missing"; exit 2; }
 [ -n "${OUT}" ] || { echo "ERR: output path missing"; exit 2; }
 
-tmp="${OUT}.part"
-echo "[encrypt] ⏳ Encrypting '${IN}' → '${OUT}' (CMS, AES-256-GCM)…"
-
-# -binary preserves exact bytes; -stream handles large files with low memory.
-openssl cms -encrypt \
-  -binary -stream \
-  -aes-256-gcm \
-  -in  "${IN}" \
-  -out "${tmp}" \
-  -outform DER \
-  "${RECIP}"
-
-# Atomic move
-mv -f -- "${tmp}" "${OUT}"
-echo "[encrypt] ✅ Wrote CMS envelope: ${OUT}"
+node "$(dirname "$0")/encrypt_file.js" -r "$RECIP" -i "$IN" -o "$OUT"

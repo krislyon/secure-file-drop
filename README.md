@@ -1,34 +1,60 @@
 # Secure File Drop
 
-Secure File Drop is a set of hardening-friendly shell scripts that let you accept
-files encrypted with CMS (Cryptographic Message Syntax) and decrypt them safely
-on a dedicated host. It covers the entire flow: key generation, directory
-provisioning, unattended decryption, and client-side encryption helpers.
+Secure File Drop is a set of hardened-friendly helpers that let you accept files
+protected with authenticated encryption while storing the wrapping keys using a
+post-quantum secure asymmetric scheme. The toolkit covers the entire flow: key
+generation, directory provisioning, unattended decryption, and client-side
+encryption helpers.
 
-## Why CMS?
+## Post-Quantum by Default
 
-CMS (the successor to PKCS#7) is widely supported, easy to automate with
-OpenSSL, and allows encrypting large payloads without revealing their contents
-or metadata. These scripts embrace CMS with AES-256-GCM envelopes so you can
-exchange files without standing up a heavyweight service.
+The original version of Secure File Drop relied on CMS/RSA envelopes. The
+project now uses a Learning-With-Errors (LWE) based public-key encryption
+scheme inspired by Regev's construction. Each payload is protected with
+AES-256-GCM and the symmetric key is wrapped with the lattice-based KEM. The
+scheme uses 640-dimensional secret vectors, a modulus of 32768, and centered
+binomial noise (η = 4), providing conservative quantum-resistant security while
+remaining fully self-contained.
+
+The wire format is JSON for ease of inspection and auditing. Every envelope
+looks like this:
+
+```json
+{
+  "format": "SFD-PQC-ENVELOPE-1",
+  "kem": {
+    "scheme": "Regev-LWE-640",
+    "params": { "n": 640, "q": 32768, "eta": 4 },
+    "ciphertext": "...base64..."
+  },
+  "aead": {
+    "algorithm": "AES-256-GCM",
+    "iv": "...",
+    "ciphertext": "...",
+    "authTag": "..."
+  }
+}
+```
 
 ## Repository Layout
 
 ```text
 .
-├── encrypt_file.js    # JavaScript example that crafts CMS envelopes directly
-├── encrypt_file.sh    # Encrypt files for the secure inbox
-├── decrypt_watch.sh   # Continuously decrypt new CMS envelopes
-├── init_keys.sh       # Create RSA keys and a self-signed certificate
-├── init_layout.sh     # Provision secure inbox/outbox directories
-└── README.md
+├── decrypt_file.js      # Decrypt a PQC envelope to plaintext
+├── decrypt_watch.sh     # Continuously decrypt new envelopes
+├── encrypt_file.js      # Encrypt files with AES-256-GCM + PQC KEM
+├── encrypt_file.sh      # Thin wrapper around encrypt_file.js
+├── init_keys.sh         # Create an LWE key pair (passphrase protected)
+├── init_layout.sh       # Provision secure inbox/outbox directories
+├── lib/pqc/             # Post-quantum primitives and key I/O helpers
+├── samples/             # Example payloads
+└── tools/               # Utility scripts (key generation & validation)
 ```
 
 ## Prerequisites
 
 * Linux or another POSIX environment with Bash ≥ 4
-* [OpenSSL](https://www.openssl.org/) 1.1 or newer (for `openssl cms` and
-  `openssl pkcs8`)
+* Node.js 18+ (for the encryption/decryption utilities)
 * Optional but recommended: [`inotify-tools`](https://github.com/inotify-tools/inotify-tools)
   so `decrypt_watch.sh` can react instantly; otherwise it falls back to polling
   every few seconds.
@@ -38,13 +64,13 @@ exchange files without standing up a heavyweight service.
 1. **Generate the recipient keys**
 
    ```bash
-   ./init_keys.sh keys "Offline CMS Recipient"
+   ./init_keys.sh keys "SFD PQC Recipient"
    ```
 
    The script prompts for a strong passphrase, stores the encrypted private key
-   (`privkey_encrypted.pk8`), the matching public key, and a self-signed
-   certificate in the target directory. Keep the passphrase safe—it is required
-   when decrypting files.
+   (`private_key_encrypted.json`) and matching public key (`public_key.json`) in
+   the target directory. Keep the passphrase safe—it is required when
+   decrypting files.
 
 2. **Provision the secure file-drop layout**
 
@@ -58,41 +84,39 @@ exchange files without standing up a heavyweight service.
 
 3. **Start the decryption watcher**
 
-   Place the certificate and encrypted private key created earlier into
+   Place `public_key.json` (optional) and `private_key_encrypted.json` in
    `/secure/keys/`, then launch:
 
    ```bash
-   CERT_PEM=/secure/keys/cert.pem \
-   PRIVKEY_PK8=/secure/keys/privkey_encrypted.pk8 \
+   PRIVKEY_JSON=/secure/keys/private_key_encrypted.json \
    ./decrypt_watch.sh
    ```
 
    The watcher validates the private key, prompts once for its passphrase (or
-   uses `PASSIN_OPT` if provided), and continuously processes new `.cms` files
-   that appear in `/secure/inbox`. Successful decryptions are written atomically
-   into `/secure/outbox` and the original envelopes are archived under
-   `/secure/processed`. Failures move the envelope to `/secure/error` for
+   honours `PASSIN_OPT` if provided), and continuously processes new `.cms`
+   envelopes that appear in `/secure/inbox`. Successful decryptions are written
+   atomically into `/secure/outbox` and the original envelopes are archived
+   under `/secure/processed`. Failures move the envelope to `/secure/error` for
    inspection.
 
 4. **Encrypt a file on the sending side**
 
    ```bash
    ./encrypt_file.sh \
-     -r /path/to/recipient_cert.pem \
+     -r /path/to/public_key.json \
      -i secret.pdf \
      -o secret.pdf.cms
    ```
 
-   The script produces a DER-formatted CMS envelope using AES-256-GCM and the
-   recipient's RSA certificate. The resulting `.cms` file can be dropped into
-   the inbox for decryption.
+   The script produces an `SFD-PQC-ENVELOPE-1` JSON file using AES-256-GCM for
+   the payload and the lattice-based KEM for key encapsulation. The resulting
+   `.cms` file can be dropped into the inbox for decryption.
 
-  Prefer JavaScript? A Node.js port that assembles the CMS structure directly
-  with the standard `crypto` library is provided in `encrypt_file.js`:
+   Prefer JavaScript? Call the Node.js implementation directly:
 
    ```bash
    node encrypt_file.js \
-     -r /path/to/recipient_cert.pem \
+     -r /path/to/public_key.json \
      -i secret.pdf \
      -o secret.pdf.cms
    ```
@@ -102,24 +126,23 @@ exchange files without standing up a heavyweight service.
 `decrypt_watch.sh` honours a handful of environment variables so it can fit
 different deployment layouts. Defaults are shown below.
 
-| Variable        | Default value                     | Purpose |
-| --------------- | --------------------------------- | ------- |
-| `WATCH_DIR`     | `/secure/inbox`                   | Location to monitor for incoming `.cms` files |
-| `OUT_DIR`       | `/secure/outbox`                  | Where decrypted payloads are written |
-| `PROCESSED_DIR` | `/secure/processed`               | Archive for successfully processed envelopes |
-| `ERROR_DIR`     | `/secure/error`                   | Holds envelopes that failed to decrypt |
-| `CERT_PEM`      | `/secure/keys/cert.pem`           | Recipient certificate (PEM) |
-| `PRIVKEY_PK8`   | `/secure/keys/privkey_encrypted.pk8` | Encrypted PKCS#8 private key |
-| `PASSIN_OPT`    | `ask`                             | How to supply the private-key passphrase (`ask`, `env:VAR`, `file:/path`, …) |
-| `POLL_SEC`      | `2`                               | Poll interval (seconds) if `inotifywait` is unavailable |
+| Variable        | Default value                               | Purpose |
+| --------------- | ------------------------------------------- | ------- |
+| `WATCH_DIR`     | `/secure/inbox`                             | Location to monitor for incoming envelopes |
+| `OUT_DIR`       | `/secure/outbox`                            | Where decrypted payloads are written |
+| `PROCESSED_DIR` | `/secure/processed`                         | Archive for successfully processed envelopes |
+| `ERROR_DIR`     | `/secure/error`                             | Holds envelopes that failed to decrypt |
+| `PRIVKEY_JSON`  | `/secure/keys/private_key_encrypted.json`   | Encrypted private key JSON |
+| `PASSIN_OPT`    | `ask`                                       | How to supply the private-key passphrase (`ask`, `env:VAR`, `pass:****`) |
+| `POLL_SEC`      | `2`                                         | Poll interval (seconds) if `inotifywait` is unavailable |
 
 Additional behaviour worth noting:
 
 * When `PASSIN_OPT=ask` (the default) and a TTY is available, the script caches
   the passphrase in memory for the lifetime of the process so you are not
   prompted for every file.
-* If `PASSIN_OPT` is set to `env:VAR`, `file:/path`, or `fd:N`, OpenSSL follows
-  its usual `-passin` semantics, allowing unattended operation.
+* If `PASSIN_OPT` is set to `env:VAR` or `pass:****`, the passphrase is sourced
+  non-interactively—useful for supervised services.
 * Directory permissions are tightened on startup whenever possible, helping you
   detect misconfigurations early.
 
@@ -130,9 +153,9 @@ Additional behaviour worth noting:
 * Back up the encrypted private key and its passphrase securely. Without them,
   encrypted files cannot be recovered.
 * Monitor the `error/` directory for envelopes that could not be decrypted—this
-  is a signal of incorrect certificates, tampering, or passphrase issues.
-* Consider rotating the recipient certificate periodically by re-running
-  `init_keys.sh` and distributing the new `cert.pem` to senders.
+  is a signal of incorrect keys, tampering, or passphrase issues.
+* Consider rotating the recipient key pair periodically by re-running
+  `init_keys.sh` and distributing the new `public_key.json` to senders.
 
 ## License
 

@@ -13,6 +13,14 @@ PASSIN_OPT="${PASSIN_OPT:-ask}"                 # how to supply pass (ask|fd:3|p
 # Polling interval (seconds) if inotifywait not available
 POLL_SEC="${POLL_SEC:-2}"
 
+CMS_KEM_ALG="${CMS_KEM_ALG:-ML-KEM-768}"
+CMS_WRAP_CIPHER="${CMS_WRAP_CIPHER:-AES-256-KWP}"
+
+OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
+
+[ -n "${CMS_KEM_ALG}" ] || { error "[config] CMS_KEM_ALG must not be empty"; exit 1; }
+[ -n "${CMS_WRAP_CIPHER}" ] || { error "[config] CMS_WRAP_CIPHER must not be empty"; exit 1; }
+
 log()   { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
 warn()  { log "WARN: $*"; }
 error() { log "ERR: $*"; }
@@ -89,7 +97,7 @@ validate_private_key() {
     error "[pass] Private key ${PRIVKEY_PK8} is missing or unreadable"
     exit 1
   fi
-  if ! openssl pkcs8 -topk8 -in "$PRIVKEY_PK8" -passin "$PASSIN_OPT" -nocrypt -out /dev/null 2>/dev/null; then
+  if ! "${OPENSSL_BIN}" pkcs8 -topk8 -in "$PRIVKEY_PK8" -passin "$PASSIN_OPT" -nocrypt -out /dev/null 2>/dev/null; then
     error "[pass] Unable to unlock private key with provided passphrase (${PRIVKEY_PK8})."
     exit 1
   fi
@@ -110,12 +118,14 @@ decrypt_one() {
   fi
   tmp="${out}.part"
 
-  log "[decrypt] ⏳ Decrypting: $base"
-  if openssl cms -decrypt -binary -inform DER \
+  log "[decrypt] ⏳ Decrypting: $base (CMS PQ KEM ${CMS_KEM_ALG})"
+  if "${OPENSSL_BIN}" cms -decrypt -binary -inform DER \
       -in "$cms" \
       -out "$tmp" \
       -recip "$CERT_PEM" \
-      -inkey "$PRIVKEY_PK8" -passin "$PASSIN_OPT"
+      -inkey "$PRIVKEY_PK8" -passin "$PASSIN_OPT" \
+      -keyopt "kem_cipher:${CMS_KEM_ALG}" \
+      -keyopt "wrap_cipher:${CMS_WRAP_CIPHER}"
   then
     mv -f -- "$tmp" "$out"
     log "[decrypt] ✅ OK → ${out}"

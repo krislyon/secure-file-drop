@@ -88,8 +88,9 @@ exchange files without standing up a heavyweight service.
    the inbox for decryption.
 
   Prefer JavaScript? A Node.js example powered by the
-  [node-forge](https://github.com/digitalbazaar/forge) library lives in
-  `encrypt_file.js`. Install the dependency once (`npm install`) and run:
+  [PKI.js](https://github.com/PeculiarVentures/PKI.js) toolchain lives in
+  `encrypt_file.js`. Install the dependencies once (`npm install`) which pulls in
+  `pkijs`, `asn1js`, and `@peculiar/webcrypto`, then run:
 
    ```bash
    node encrypt_file.js \

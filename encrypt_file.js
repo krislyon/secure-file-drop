@@ -2,34 +2,63 @@
 'use strict';
 
 /**
- * CMS (Cryptographic Message Syntax) encryptor backed by node-forge.
+ * CMS (Cryptographic Message Syntax) encryptor backed by PKI.js.
  *
- * This example mirrors the behaviour of encrypt_file.sh but relies on the
- * battle-tested node-forge library to assemble the PKCS#7 / CMS envelope
- * rather than manually crafting ASN.1 structures. The script supports a single
- * RSA recipient and uses AES-256 content encryption. node-forge automatically
- * negotiates the necessary key-wrapping details and produces a DER-encoded CMS
- * EnvelopedData structure that OpenSSL can decrypt.
+ * This example mirrors the behaviour of encrypt_file.sh but relies on
+ * well-maintained PKCS#7/CMS tooling from the PKI.js ecosystem instead of
+ * hand-rolled ASN.1. A single RSA recipient is supported and the content is
+ * wrapped with AES-256-GCM, matching the OpenSSL-based shell implementation.
  */
 
 const fs = require('fs');
 const path = require('path');
 
-let forge;
-try {
-  forge = require('node-forge');
-} catch (err) {
-  if (err && err.code === 'MODULE_NOT_FOUND') {
-    console.error('The "node-forge" package is required. Install it with "npm install" before running this script.');
-    process.exit(1);
+let cryptoDepsPromise;
+
+async function loadCryptoDependencies() {
+  if (!cryptoDepsPromise) {
+    cryptoDepsPromise = (async () => {
+      try {
+        const [webcryptoModule, asn1Module, pkijsModule] = await Promise.all([
+          import('@peculiar/webcrypto'),
+          import('asn1js'),
+          import('pkijs')
+        ]);
+
+        const CryptoCtor = webcryptoModule.Crypto || webcryptoModule.default;
+        const asn1js = asn1Module.default || asn1Module;
+        const pkijs = pkijsModule.default || pkijsModule;
+
+        if (!CryptoCtor) {
+          throw new Error('Failed to load @peculiar/webcrypto.');
+        }
+
+        const webcrypto = new CryptoCtor();
+        const { setEngine, CryptoEngine } = pkijs;
+        setEngine('nodeEngine', webcrypto, new CryptoEngine({
+          name: 'nodeEngine',
+          crypto: webcrypto,
+          subtle: webcrypto.subtle
+        }));
+
+        return { asn1js, pkijs };
+      } catch (err) {
+        if (err && (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'MODULE_NOT_FOUND')) {
+          console.error('Missing required dependencies. Run "npm install" to install pkijs, asn1js, and @peculiar/webcrypto.');
+          process.exit(1);
+        }
+        throw err;
+      }
+    })();
   }
-  throw err;
+
+  return cryptoDepsPromise;
 }
 
 function usage() {
   const script = path.basename(process.argv[1] || 'encrypt_file.js');
   console.log(`Usage: ${script} -r CERT_PEM -i INPUT -o OUTPUT\n` +
-    'Encrypt INPUT into a CMS envelope using node-forge.\n' +
+    'Encrypt INPUT into a CMS envelope using PKI.js (AES-256-GCM).\n' +
     '\n' +
     'Options:\n' +
     '  -r, --recipient  Recipient certificate (PEM, contains RSA public key)\n' +
@@ -87,29 +116,47 @@ function ensureReadableFile(label, filePath) {
   }
 }
 
-function encryptWithForge(certificatePem, payloadBuffer) {
-  let certificate;
-  try {
-    certificate = forge.pki.certificateFromPem(certificatePem);
-  } catch (err) {
-    throw new Error(`Failed to parse recipient certificate: ${err.message}`);
-  }
-
-  const payloadBytes = payloadBuffer.toString('binary');
-  const envelope = forge.pkcs7.createEnvelopedData();
-  envelope.addRecipient(certificate);
-  envelope.content = forge.util.createBuffer(payloadBytes, 'binary');
-
-  try {
-    envelope.encrypt({ cipher: 'aes256' });
-  } catch (err) {
-    throw new Error(`Encryption failed (node-forge): ${err.message}`);
-  }
-
-  return { envelope, algorithm: 'AES-256-CBC' };
+function pemToDer(pem) {
+  const base64 = pem
+    .replace(/-----BEGIN CERTIFICATE-----/g, '')
+    .replace(/-----END CERTIFICATE-----/g, '')
+    .replace(/\s+/g, '');
+  return Buffer.from(base64, 'base64');
 }
 
-function main() {
+function toArrayBuffer(buffer) {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
+async function encryptWithPkijs(certificatePem, payloadBuffer) {
+  const { asn1js, pkijs } = await loadCryptoDependencies();
+
+  const derCert = pemToDer(certificatePem);
+  const asn1 = asn1js.fromBER(toArrayBuffer(derCert));
+  if (asn1.offset === -1) {
+    throw new Error('Failed to parse recipient certificate. Ensure it is a valid PEM-encoded X.509 certificate.');
+  }
+
+  const certificate = new pkijs.Certificate({ schema: asn1.result });
+  const envelopedData = new pkijs.EnvelopedData();
+
+  await envelopedData.addRecipientByCertificate(certificate, {});
+
+  const messageArrayBuffer = toArrayBuffer(payloadBuffer);
+  await envelopedData.encrypt({
+    name: 'AES-GCM',
+    length: 256
+  }, messageArrayBuffer);
+
+  const contentInfo = new pkijs.ContentInfo();
+  contentInfo.contentType = '1.2.840.113549.1.7.3'; // EnvelopedData
+  contentInfo.content = envelopedData.toSchema();
+
+  const cmsDer = contentInfo.toSchema().toBER(false);
+  return { buffer: Buffer.from(cmsDer), algorithm: 'AES-256-GCM' };
+}
+
+async function main() {
   const { recipient, input, output } = parseArgs();
 
   try {
@@ -127,14 +174,14 @@ function main() {
   const certPem = fs.readFileSync(recipient, 'utf8');
   const plaintext = fs.readFileSync(input);
 
-  const { envelope, algorithm } = encryptWithForge(certPem, plaintext);
-  const derBytes = forge.asn1.toDer(envelope.toAsn1()).getBytes();
-  const derBuffer = Buffer.from(derBytes, 'binary');
-
-  fs.writeFileSync(output, derBuffer);
+  const { buffer, algorithm } = await encryptWithPkijs(certPem, plaintext);
+  fs.writeFileSync(output, buffer);
   console.log(`[encrypt] ✅ Encrypted '${input}' → '${output}' using ${algorithm}.`);
 }
 
 if (require.main === module) {
-  main();
+  main().catch((err) => {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  });
 }

@@ -41,7 +41,7 @@ async function loadCryptoDependencies() {
           subtle: webcrypto.subtle
         }));
 
-        return { asn1js, pkijs };
+        return { asn1js, pkijs, webcrypto };
       } catch (err) {
         if (err && (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'MODULE_NOT_FOUND')) {
           console.error('Missing required dependencies. Run "npm install" to install pkijs, asn1js, and @peculiar/webcrypto.');
@@ -129,7 +129,8 @@ function toArrayBuffer(buffer) {
 }
 
 async function encryptWithPkijs(certificatePem, payloadBuffer) {
-  const { asn1js, pkijs } = await loadCryptoDependencies();
+  const { asn1js, pkijs, webcrypto } = await loadCryptoDependencies();
+  const AES256_GCM_OID = '2.16.840.1.101.3.4.1.46';
 
   const derCert = pemToDer(certificatePem);
   const asn1 = asn1js.fromBER(toArrayBuffer(derCert));
@@ -142,11 +143,34 @@ async function encryptWithPkijs(certificatePem, payloadBuffer) {
 
   await envelopedData.addRecipientByCertificate(certificate, {});
 
+  const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const tagLengthBits = 128;
+
   const messageArrayBuffer = toArrayBuffer(payloadBuffer);
   await envelopedData.encrypt({
     name: 'AES-GCM',
-    length: 256
+    length: 256,
+    iv,
+    tagLength: tagLengthBits
   }, messageArrayBuffer);
+
+  // PKI.js populates the algorithm parameters with a bare OCTET STRING by default,
+  // but OpenSSL expects RFC 5084's GCMParameters sequence (nonce + ICV length).
+  const gcmParameters = new asn1js.Sequence({
+    value: [
+      new asn1js.OctetString({
+        valueHex: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength)
+      }),
+      new asn1js.Integer({ value: tagLengthBits / 8 })
+    ]
+  });
+  const { contentEncryptionAlgorithm } = envelopedData.encryptedContentInfo;
+  contentEncryptionAlgorithm.algorithmId = AES256_GCM_OID;
+  if ('algorithmParams' in contentEncryptionAlgorithm) {
+    contentEncryptionAlgorithm.algorithmParams = gcmParameters;
+  } else {
+    contentEncryptionAlgorithm.parameters = gcmParameters;
+  }
 
   const contentInfo = new pkijs.ContentInfo();
   contentInfo.contentType = '1.2.840.113549.1.7.3'; // EnvelopedData

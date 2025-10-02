@@ -1,64 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
-/**
- * CMS (Cryptographic Message Syntax) encryptor backed by PKI.js.
- *
- * This example mirrors the behaviour of encrypt_file.sh but relies on
- * well-maintained PKCS#7/CMS tooling from the PKI.js ecosystem instead of
- * hand-rolled ASN.1. A single RSA recipient is supported and the content is
- * wrapped with AES-256-GCM, matching the OpenSSL-based shell implementation.
- */
-
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-
-let cryptoDepsPromise;
-
-async function loadCryptoDependencies() {
-  if (!cryptoDepsPromise) {
-    cryptoDepsPromise = (async () => {
-      try {
-        const [webcryptoModule, asn1Module, pkijsModule] = await Promise.all([
-          import('@peculiar/webcrypto'),
-          import('asn1js'),
-          import('pkijs')
-        ]);
-
-        const CryptoCtor = webcryptoModule.Crypto || webcryptoModule.default;
-        const asn1js = asn1Module.default || asn1Module;
-        const pkijs = pkijsModule.default || pkijsModule;
-
-        if (!CryptoCtor) {
-          throw new Error('Failed to load @peculiar/webcrypto.');
-        }
-
-        const webcrypto = new CryptoCtor();
-        const { setEngine, CryptoEngine } = pkijs;
-        setEngine('nodeEngine', webcrypto, new CryptoEngine({
-          name: 'nodeEngine',
-          crypto: webcrypto,
-          subtle: webcrypto.subtle
-        }));
-
-        return { asn1js, pkijs, webcrypto };
-      } catch (err) {
-        if (err && (err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'MODULE_NOT_FOUND')) {
-          console.error('Missing required dependencies. Run "npm install" to install pkijs, asn1js, and @peculiar/webcrypto.');
-          process.exit(1);
-        }
-        throw err;
-      }
-    })();
-  }
-
-  return cryptoDepsPromise;
-}
 
 function usage() {
   const script = path.basename(process.argv[1] || 'encrypt_file.js');
   console.log(`Usage: ${script} -r CERT_PEM -i INPUT -o OUTPUT\n` +
-    'Encrypt INPUT into a CMS envelope using PKI.js (AES-256-GCM).\n' +
+    'Encrypt INPUT into a CMS (DER) file using OpenSSL (AES-256-GCM).\n' +
     '\n' +
     'Options:\n' +
     '  -r, --recipient  Recipient certificate (PEM, contains RSA public key)\n' +
@@ -116,96 +66,77 @@ function ensureReadableFile(label, filePath) {
   }
 }
 
-function pemToDer(pem) {
-  const base64 = pem
-    .replace(/-----BEGIN CERTIFICATE-----/g, '')
-    .replace(/-----END CERTIFICATE-----/g, '')
-    .replace(/\s+/g, '');
-  return Buffer.from(base64, 'base64');
-}
+async function runOpenssl(args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('openssl', args, { stdio: ['ignore', 'pipe', 'pipe'], ...options });
+    let stderr = '';
 
-function toArrayBuffer(buffer) {
-  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-}
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
 
-async function encryptWithPkijs(certificatePem, payloadBuffer) {
-  const { asn1js, pkijs, webcrypto } = await loadCryptoDependencies();
-  const AES256_GCM_OID = '2.16.840.1.101.3.4.1.46';
+    child.on('error', (err) => {
+      reject(new Error(`Failed to start openssl: ${err.message}`));
+    });
 
-  const derCert = pemToDer(certificatePem);
-  const asn1 = asn1js.fromBER(toArrayBuffer(derCert));
-  if (asn1.offset === -1) {
-    throw new Error('Failed to parse recipient certificate. Ensure it is a valid PEM-encoded X.509 certificate.');
-  }
-
-  const certificate = new pkijs.Certificate({ schema: asn1.result });
-  const envelopedData = new pkijs.EnvelopedData();
-
-  await envelopedData.addRecipientByCertificate(certificate, {});
-
-  const iv = webcrypto.getRandomValues(new Uint8Array(12));
-  const tagLengthBits = 128;
-
-  const messageArrayBuffer = toArrayBuffer(payloadBuffer);
-  await envelopedData.encrypt({
-    name: 'AES-GCM',
-    length: 256,
-    iv,
-    tagLength: tagLengthBits
-  }, messageArrayBuffer);
-
-  // PKI.js populates the algorithm parameters with a bare OCTET STRING by default,
-  // but OpenSSL expects RFC 5084's GCMParameters sequence (nonce + ICV length).
-  const gcmParameters = new asn1js.Sequence({
-    value: [
-      new asn1js.OctetString({
-        valueHex: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength)
-      }),
-      new asn1js.Integer({ value: tagLengthBits / 8 })
-    ]
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        const message = stderr.trim() || `openssl exited with code ${code}`;
+        reject(new Error(message));
+      }
+    });
   });
-  const { contentEncryptionAlgorithm } = envelopedData.encryptedContentInfo;
-  contentEncryptionAlgorithm.algorithmId = AES256_GCM_OID;
-  if ('algorithmParams' in contentEncryptionAlgorithm) {
-    contentEncryptionAlgorithm.algorithmParams = gcmParameters;
-  } else {
-    contentEncryptionAlgorithm.parameters = gcmParameters;
+}
+
+async function encrypt(recipient, input, output) {
+  ensureReadableFile('recipient certificate', recipient);
+  ensureReadableFile('input file', input);
+  if (!output) {
+    throw new Error('Missing required output path');
   }
 
-  const contentInfo = new pkijs.ContentInfo();
-  contentInfo.contentType = '1.2.840.113549.1.7.3'; // EnvelopedData
-  contentInfo.content = envelopedData.toSchema();
+  const tmpPath = `${output}.part`;
+  console.log(`[encrypt] ⏳ Encrypting '${input}' → '${output}' (CMS, AES-256-GCM)…`);
 
-  const cmsDer = contentInfo.toSchema().toBER(false);
-  return { buffer: Buffer.from(cmsDer), algorithm: 'AES-256-GCM' };
+  const args = [
+    'cms', '-encrypt',
+    '-binary', '-stream',
+    '-aes-256-gcm',
+    '-in', input,
+    '-out', tmpPath,
+    '-outform', 'DER',
+    recipient
+  ];
+
+  try {
+    await runOpenssl(args);
+    fs.renameSync(tmpPath, output);
+  } catch (err) {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch (cleanupErr) {
+      // Ignore cleanup errors.
+    }
+    throw err;
+  }
+
+  console.log(`[encrypt] ✅ Wrote CMS envelope: ${output}`);
 }
 
 async function main() {
   const { recipient, input, output } = parseArgs();
 
   try {
-    ensureReadableFile('recipient certificate', recipient);
-    ensureReadableFile('input file', input);
-    if (!output) {
-      throw new Error('Missing required output path');
-    }
+    await encrypt(recipient, input, output);
   } catch (err) {
     console.error(`Error: ${err.message}`);
     usage();
-    process.exit(2);
+    process.exit(1);
   }
-
-  const certPem = fs.readFileSync(recipient, 'utf8');
-  const plaintext = fs.readFileSync(input);
-
-  const { buffer, algorithm } = await encryptWithPkijs(certPem, plaintext);
-  fs.writeFileSync(output, buffer);
-  console.log(`[encrypt] ✅ Encrypted '${input}' → '${output}' using ${algorithm}.`);
 }
 
 if (require.main === module) {
-  main().catch((err) => {
-    console.error(`Error: ${err.message}`);
-    process.exit(1);
-  });
+  main();
 }

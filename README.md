@@ -16,7 +16,7 @@ exchange files without standing up a heavyweight service.
 
 ```text
 .
-├── encrypt_file.js    # JavaScript example that crafts CMS envelopes directly
+├── encrypt_file.js    # JavaScript example that builds CMS with Node.js crypto
 ├── encrypt_file.sh    # Encrypt files for the secure inbox
 ├── decrypt_watch.sh   # Continuously decrypt new CMS envelopes
 ├── init_keys.sh       # Create RSA keys and a self-signed certificate
@@ -87,8 +87,10 @@ exchange files without standing up a heavyweight service.
    recipient's RSA certificate. The resulting `.cms` file can be dropped into
    the inbox for decryption.
 
-  Prefer JavaScript? A Node.js port that assembles the CMS structure directly
-  with the standard `crypto` library is provided in `encrypt_file.js`:
+  Prefer JavaScript? `encrypt_file.js` shows how to assemble the same
+  AuthEnvelopedData structure directly from Node.js using the built-in `crypto`
+  module—no external OpenSSL calls required. Invoke the helper with the same
+  flags as the shell script:
 
    ```bash
    node encrypt_file.js \

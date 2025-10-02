@@ -1,44 +1,29 @@
 #!/usr/bin/env node
 'use strict';
 
-/**
- * Pure-JavaScript CMS (AuthenticatedEnvelopedData) encryptor.
- *
- * This script mirrors the behaviour of encrypt_file.sh but performs the CMS
- * assembly itself using Node's crypto primitives instead of invoking the
- * OpenSSL CLI. It supports a single RSA recipient and AES-256-GCM content
- * encryption, which matches the defaults used throughout the project.
- */
-
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const {
-  randomBytes,
-  createCipheriv,
-  publicEncrypt,
-  X509Certificate,
-  constants: { RSA_PKCS1_PADDING },
-} = crypto;
-
-const OIDS = {
-  idSmimeCtAuthEnvelopedData: '1.2.840.113549.1.9.16.1.23',
-  pkcs7Data: '1.2.840.113549.1.7.1',
-  rsaEncryption: '1.2.840.113549.1.1.1',
-  aes256Gcm: '2.16.840.1.101.3.4.1.46',
+const OID = {
+  AUTH_ENVELOPED_DATA: '1.2.840.113549.1.9.16.1.23',
+  DATA: '1.2.840.113549.1.7.1',
+  RSA_ENCRYPTION: '1.2.840.113549.1.1.1',
+  AES_256_GCM: '2.16.840.1.101.3.4.1.46'
 };
 
 function usage() {
   const script = path.basename(process.argv[1] || 'encrypt_file.js');
-  console.log(`Usage: ${script} -r CERT_PEM -i INPUT -o OUTPUT\n` +
-    'Encrypt INPUT into a CMS AuthEnvelopedData structure using AES-256-GCM.\n' +
-    '\n' +
-    'Options:\n' +
-    '  -r, --recipient  Recipient certificate (PEM, contains RSA public key)\n' +
-    '  -i, --input      Input file to encrypt\n' +
-    '  -o, --output     Output CMS file (e.g., file.cms)\n' +
-    '  -h, --help       Show this message');
+  console.log(
+    `Usage: ${script} -r CERT_PEM -i INPUT -o OUTPUT\n` +
+      'Encrypt INPUT into a CMS (DER) file using AES-256-GCM for content and RSA key transport.\n' +
+      '\n' +
+      'Options:\n' +
+      '  -r, --recipient  Recipient certificate (PEM, contains RSA public key)\n' +
+      '  -i, --input      Input file to encrypt\n' +
+      '  -o, --output     Output CMS file (e.g., file.cms)\n' +
+      '  -h, --help       Show this message'
+  );
 }
 
 function parseArgs() {
@@ -77,108 +62,103 @@ function parseArgs() {
   return { recipient, input, output };
 }
 
-function readElement(buffer, offset = 0) {
+function ensureReadableFile(label, filePath) {
+  if (!filePath) {
+    throw new Error(`Missing required ${label} path`);
+  }
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`${label} not found: ${filePath}`);
+  }
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile()) {
+    throw new Error(`${label} must be a regular file: ${filePath}`);
+  }
+}
+
+function readASN1Element(buffer, offset) {
   if (offset >= buffer.length) {
-    throw new Error('ASN.1 parse error: truncated element');
+    throw new Error('Unexpected end of ASN.1 data');
   }
-
-  const tagByte = buffer[offset];
-  const tagClassIndex = tagByte >> 6;
-  const tagClasses = ['universal', 'application', 'context', 'private'];
-  const tagClass = tagClasses[tagClassIndex];
-  const constructed = (tagByte & 0x20) !== 0;
-  let tagNumber = tagByte & 0x1f;
-  let cursor = offset + 1;
-
-  if (tagNumber === 0x1f) {
-    tagNumber = 0;
-    let b;
-    do {
-      if (cursor >= buffer.length) {
-        throw new Error('ASN.1 parse error: truncated long-form tag');
-      }
-      b = buffer[cursor];
-      cursor += 1;
-      tagNumber = (tagNumber << 7) | (b & 0x7f);
-    } while ((b & 0x80) !== 0);
+  const tag = buffer[offset];
+  if (offset + 1 >= buffer.length) {
+    throw new Error('Malformed ASN.1 length');
   }
+  const lengthByte = buffer[offset + 1];
+  let length = 0;
+  let headerLength = 2;
 
-  if (cursor >= buffer.length) {
-    throw new Error('ASN.1 parse error: missing length');
-  }
-
-  const lenByte = buffer[cursor];
-  cursor += 1;
-  let length;
-
-  if ((lenByte & 0x80) === 0) {
-    length = lenByte;
+  if ((lengthByte & 0x80) === 0) {
+    length = lengthByte;
   } else {
-    const numBytes = lenByte & 0x7f;
+    const numBytes = lengthByte & 0x7f;
     if (numBytes === 0) {
-      throw new Error('ASN.1 parse error: indefinite length not supported');
+      throw new Error('Indefinite lengths are not supported');
     }
-    if (cursor + numBytes > buffer.length) {
-      throw new Error('ASN.1 parse error: truncated length');
+    if (offset + 2 + numBytes > buffer.length) {
+      throw new Error('Malformed ASN.1 length');
     }
-    length = 0;
     for (let i = 0; i < numBytes; i += 1) {
-      length = (length << 8) | buffer[cursor + i];
+      length = (length << 8) | buffer[offset + 2 + i];
     }
-    cursor += numBytes;
+    headerLength += numBytes;
   }
 
-  const contentOffset = cursor;
-  const end = contentOffset + length;
-  if (end > buffer.length) {
-    throw new Error('ASN.1 parse error: truncated content');
+  const contentStart = offset + headerLength;
+  const contentEnd = contentStart + length;
+  if (contentEnd > buffer.length) {
+    throw new Error('ASN.1 element overruns buffer');
   }
 
   return {
-    tagClass,
-    constructed,
-    tagNumber,
-    headerLength: cursor - offset,
-    contentOffset,
-    contentLength: length,
-    start: offset,
-    end,
+    tag,
+    length,
+    headerLength,
+    contentStart,
+    contentEnd,
+    totalLength: headerLength + length
   };
 }
 
-function extractIssuerAndSerial(certDer) {
-  const root = readElement(certDer, 0);
-  if (root.tagClass !== 'universal' || root.tagNumber !== 16) {
-    throw new Error('Unexpected certificate structure');
+function extractIssuerAndSerial(pemPath) {
+  const pem = fs.readFileSync(pemPath, 'utf8');
+  const x509 = new crypto.X509Certificate(pem);
+  const der = x509.raw;
+
+  const certSeq = readASN1Element(der, 0);
+  if (certSeq.tag !== 0x30) {
+    throw new Error('Certificate is not a sequence');
   }
 
-  const tbs = readElement(certDer, root.contentOffset);
-  let cursor = tbs.contentOffset;
-
-  // Optional version field [0] EXPLICIT
-  const maybeVersion = readElement(certDer, cursor);
-  if (maybeVersion.tagClass === 'context' && maybeVersion.tagNumber === 0) {
-    cursor = maybeVersion.end;
+  const tbsOffset = certSeq.contentStart;
+  const tbs = readASN1Element(der, tbsOffset);
+  if (tbs.tag !== 0x30) {
+    throw new Error('TBSCertificate is not a sequence');
   }
 
-  const serialElem = readElement(certDer, cursor);
-  if (serialElem.tagClass !== 'universal' || serialElem.tagNumber !== 2) {
-    throw new Error('Certificate serial number missing');
+  let pos = tbs.contentStart;
+  let element = readASN1Element(der, pos);
+
+  if (element.tag === 0xa0) {
+    pos += element.totalLength;
+    element = readASN1Element(der, pos);
   }
-  const serial = certDer.slice(serialElem.contentOffset, serialElem.end);
-  cursor = serialElem.end;
 
-  // Skip signature algorithm identifier
-  const sigAlg = readElement(certDer, cursor);
-  cursor = sigAlg.end;
-
-  const issuerElem = readElement(certDer, cursor);
-  if (issuerElem.tagClass !== 'universal' || issuerElem.tagNumber !== 16) {
-    throw new Error('Certificate issuer missing');
+  if (element.tag !== 0x02) {
+    throw new Error('Expected serialNumber INTEGER');
   }
-  const issuer = certDer.slice(issuerElem.start, issuerElem.end);
+  const serial = der.slice(element.contentStart, element.contentEnd);
+  pos += element.totalLength;
 
-  return { issuer, serial }; // serial contains the INTEGER value bytes
+  element = readASN1Element(der, pos); // signature algorithm
+  pos += element.totalLength;
+
+  element = readASN1Element(der, pos); // issuer
+  if (element.tag !== 0x30) {
+    throw new Error('Expected issuer Name sequence');
+  }
+  const issuerDer = der.slice(pos, pos + element.totalLength);
+
+  return { pem, issuerDer, serial };
 }
 
 function encodeLength(length) {
@@ -186,247 +166,183 @@ function encodeLength(length) {
     return Buffer.from([length]);
   }
   const bytes = [];
-  let value = length;
-  while (value > 0) {
-    bytes.unshift(value & 0xff);
-    value >>= 8;
+  let remaining = length;
+  while (remaining > 0) {
+    bytes.unshift(remaining & 0xff);
+    remaining >>= 8;
   }
   return Buffer.from([0x80 | bytes.length, ...bytes]);
 }
 
-function encodeTLV(tag, value) {
-  return Buffer.concat([Buffer.from([tag]), encodeLength(value.length), value]);
-}
-
-function trimIntegerBuffer(buf) {
-  let offset = 0;
-  while (offset < buf.length - 1 && buf[offset] === 0x00 && (buf[offset + 1] & 0x80) === 0) {
-    offset += 1;
-  }
-  return buf.slice(offset);
-}
-
 function encodeInteger(value) {
-  let buf;
-  if (typeof value === 'number') {
-    if (value === 0) {
-      buf = Buffer.from([0]);
-    } else {
-      const bytes = [];
-      let v = value;
-      while (v > 0) {
-        bytes.unshift(v & 0xff);
-        v >>= 8;
-      }
-      buf = Buffer.from(bytes);
-    }
-  } else if (Buffer.isBuffer(value)) {
-    buf = Buffer.from(value);
-  } else {
-    throw new TypeError('INTEGER must be a number or Buffer');
-  }
-
+  let buf = Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from([value]);
   if (buf.length === 0) {
     buf = Buffer.from([0]);
   }
-
-  buf = trimIntegerBuffer(buf);
-  if ((buf[0] & 0x80) !== 0) {
+  let index = 0;
+  while (index < buf.length - 1 && buf[index] === 0x00 && (buf[index + 1] & 0x80) === 0) {
+    index += 1;
+  }
+  buf = buf.slice(index);
+  if (buf[0] & 0x80) {
     buf = Buffer.concat([Buffer.from([0x00]), buf]);
   }
+  return Buffer.concat([Buffer.from([0x02]), encodeLength(buf.length), buf]);
+}
 
-  return encodeTLV(0x02, buf);
+function encodeOID(oid) {
+  const parts = oid.split('.').map((part) => Number(part));
+  if (parts.length < 2) {
+    throw new Error(`Invalid OID: ${oid}`);
+  }
+  const firstByte = 40 * parts[0] + parts[1];
+  const body = [firstByte];
+  for (let i = 2; i < parts.length; i += 1) {
+    body.push(...encodeBase128(parts[i]));
+  }
+  const content = Buffer.from(body);
+  return Buffer.concat([Buffer.from([0x06]), encodeLength(content.length), content]);
+}
+
+function encodeBase128(value) {
+  if (value === 0) {
+    return [0];
+  }
+  const bytes = [];
+  let remaining = value;
+  while (remaining > 0) {
+    bytes.unshift(remaining & 0x7f);
+    remaining >>= 7;
+  }
+  for (let i = 0; i < bytes.length - 1; i += 1) {
+    bytes[i] |= 0x80;
+  }
+  return bytes;
+}
+
+function encodeOctetString(buffer) {
+  const content = Buffer.from(buffer);
+  return Buffer.concat([Buffer.from([0x04]), encodeLength(content.length), content]);
 }
 
 function encodeNull() {
   return Buffer.from([0x05, 0x00]);
 }
 
-function encodeOctetString(value) {
-  return encodeTLV(0x04, value);
+function encodeSequence(components) {
+  const content = Buffer.concat(components);
+  return Buffer.concat([Buffer.from([0x30]), encodeLength(content.length), content]);
 }
 
-function encodeOID(oid) {
-  const parts = oid.split('.').map((n) => {
-    const num = Number.parseInt(n, 10);
-    if (!Number.isFinite(num) || num < 0) {
-      throw new Error(`Invalid OID component: ${n}`);
-    }
-    return num;
-  });
+function encodeSet(components) {
+  const content = Buffer.concat(components);
+  return Buffer.concat([Buffer.from([0x31]), encodeLength(content.length), content]);
+}
 
-  if (parts.length < 2) {
-    throw new Error('OID must have at least two components');
+function encodeExplicit(tagNumber, content) {
+  const tag = 0xa0 + tagNumber;
+  return Buffer.concat([Buffer.from([tag]), encodeLength(content.length), content]);
+}
+
+function encodeImplicitOctetString(tagNumber, buffer) {
+  const content = Buffer.from(buffer);
+  return Buffer.concat([Buffer.from([0x80 | tagNumber]), encodeLength(content.length), content]);
+}
+
+function encodeGcmParameters(iv, tagLength) {
+  const components = [encodeOctetString(iv)];
+  if (typeof tagLength === 'number') {
+    components.push(encodeInteger(tagLength));
   }
-
-  const first = 40 * parts[0] + parts[1];
-  const bytes = [first];
-
-  for (let i = 2; i < parts.length; i += 1) {
-    let value = parts[i];
-    if (value === 0) {
-      bytes.push(0);
-      continue;
-    }
-    const stack = [];
-    while (value > 0) {
-      stack.unshift((value & 0x7f) | 0x80);
-      value >>= 7;
-    }
-    stack[stack.length - 1] &= 0x7f;
-    bytes.push(...stack);
-  }
-
-  return encodeTLV(0x06, Buffer.from(bytes));
+  return encodeSequence(components);
 }
 
-function encodeSequence(elements) {
-  return encodeTLV(0x30, Buffer.concat(elements));
-}
-
-function encodeSet(elements) {
-  const sorted = elements.slice().sort(Buffer.compare);
-  return encodeTLV(0x31, Buffer.concat(sorted));
-}
-
-function encodeContextExplicit(tagNumber, inner) {
-  if (!Buffer.isBuffer(inner)) {
-    throw new TypeError('Explicit context value must be a Buffer');
-  }
-  return encodeTLV(0xa0 + tagNumber, inner);
-}
-
-function encodeContextPrimitive(tagNumber, value) {
-  return encodeTLV(0x80 + tagNumber, value);
-}
-
-function buildRecipientInfo({ issuer, serial, encryptedKey }) {
-  const version = encodeInteger(0);
-  const issuerAndSerial = encodeSequence([
-    issuer,
-    encodeInteger(serial),
-  ]);
-  const keyEncryptionAlgorithm = encodeSequence([
-    encodeOID(OIDS.rsaEncryption),
-    encodeNull(),
-  ]);
-  const encryptedKeyOctets = encodeOctetString(encryptedKey);
-
-  return encodeSequence([
-    version,
-    issuerAndSerial,
-    keyEncryptionAlgorithm,
-    encryptedKeyOctets,
-  ]);
-}
-
-function buildAuthenticatedEnvelopedData({ recipientInfo, iv, ciphertext, authTag }) {
-  const version = encodeInteger(0);
-  const recipientInfos = encodeSet([recipientInfo]);
-  const gcmParameters = encodeSequence([
-    encodeOctetString(iv),
-    encodeInteger(16),
-  ]);
-  const contentEncryptionAlgorithm = encodeSequence([
-    encodeOID(OIDS.aes256Gcm),
-    gcmParameters,
-  ]);
-  const encryptedContentInfo = encodeSequence([
-    encodeOID(OIDS.pkcs7Data),
-    contentEncryptionAlgorithm,
-    encodeContextPrimitive(0, ciphertext),
-  ]);
-  const mac = encodeOctetString(authTag);
-
-  return encodeSequence([
-    version,
-    recipientInfos,
-    encryptedContentInfo,
-    mac,
-  ]);
-}
-
-function buildContentInfo(authEnvelopedData) {
-  return encodeSequence([
-    encodeOID(OIDS.idSmimeCtAuthEnvelopedData),
-    encodeContextExplicit(0, authEnvelopedData),
-  ]);
-}
-
-function encryptPayload(plaintext) {
-  const key = randomBytes(32);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
+function encryptContent(plaintext) {
+  const cek = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', cek, iv, { authTagLength: 16 });
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return { key, iv, ciphertext, authTag };
+  const tag = cipher.getAuthTag();
+  return { cek, iv, ciphertext, tag };
 }
 
-function encryptContentEncryptionKey(cert, cek) {
-  return publicEncrypt({
-    key: cert.publicKey,
-    padding: RSA_PKCS1_PADDING,
-  }, cek);
+function buildCmsEnvelope(encryptionResult, certInfo) {
+  const encryptedKey = crypto.publicEncrypt(
+    {
+      key: certInfo.pem,
+      padding: crypto.constants.RSA_PKCS1_PADDING
+    },
+    encryptionResult.cek
+  );
+
+  const recipientInfo = encodeSequence([
+    encodeInteger(0),
+    encodeSequence([
+      certInfo.issuerDer,
+      encodeInteger(certInfo.serial)
+    ]),
+    encodeSequence([
+      encodeOID(OID.RSA_ENCRYPTION),
+      encodeNull()
+    ]),
+    encodeOctetString(encryptedKey)
+  ]);
+
+  const gcmParameters = encodeGcmParameters(encryptionResult.iv, 16);
+
+  const authEncryptedContentInfo = encodeSequence([
+    encodeOID(OID.DATA),
+    encodeSequence([
+      encodeOID(OID.AES_256_GCM),
+      gcmParameters
+    ]),
+    encodeImplicitOctetString(0, encryptionResult.ciphertext)
+  ]);
+
+  const authEnvelopedData = encodeSequence([
+    encodeInteger(0),
+    encodeSet([recipientInfo]),
+    authEncryptedContentInfo,
+    encodeOctetString(encryptionResult.tag)
+  ]);
+
+  return encodeSequence([
+    encodeOID(OID.AUTH_ENVELOPED_DATA),
+    encodeExplicit(0, authEnvelopedData)
+  ]);
+}
+
+function encrypt(recipientPath, inputPath, outputPath) {
+  ensureReadableFile('recipient certificate', recipientPath);
+  ensureReadableFile('input file', inputPath);
+  if (!outputPath) {
+    throw new Error('Missing required output path');
+  }
+
+  const certInfo = extractIssuerAndSerial(recipientPath);
+  const plaintext = fs.readFileSync(inputPath);
+  const encryptionResult = encryptContent(plaintext);
+  const cmsDer = buildCmsEnvelope(encryptionResult, certInfo);
+
+  const tmpPath = `${outputPath}.part`;
+  fs.writeFileSync(tmpPath, cmsDer);
+  fs.renameSync(tmpPath, outputPath);
 }
 
 function main() {
   const { recipient, input, output } = parseArgs();
 
-  if (!recipient || !fs.existsSync(recipient)) {
-    console.error('ERR: recipient cert missing');
-    process.exit(2);
-  }
-
-  if (!input || !fs.existsSync(input)) {
-    console.error('ERR: input file missing');
-    process.exit(2);
-  }
-
-  if (!output) {
-    console.error('ERR: output path missing');
-    process.exit(2);
-  }
-
-  const tmp = `${output}.part`;
-
-  console.log(`[encrypt] ⏳ Encrypting '${input}' → '${output}' (CMS, AES-256-GCM)…`);
-
   try {
-    const pem = fs.readFileSync(recipient, 'utf8');
-    const cert = new X509Certificate(pem);
-    if (!cert.publicKey || cert.publicKey.asymmetricKeyType !== 'rsa') {
-      throw new Error('Recipient certificate must contain an RSA public key');
-    }
-
-    const { issuer, serial } = extractIssuerAndSerial(cert.raw);
-    const plaintext = fs.readFileSync(input);
-    const { key, iv, ciphertext, authTag } = encryptPayload(plaintext);
-    const encryptedKey = encryptContentEncryptionKey(cert, key);
-    const recipientInfo = buildRecipientInfo({ issuer, serial, encryptedKey });
-    const authEnv = buildAuthenticatedEnvelopedData({ recipientInfo, iv, ciphertext, authTag });
-    const cms = buildContentInfo(authEnv);
-
-    fs.writeFileSync(tmp, cms);
-    fs.renameSync(tmp, output);
+    console.log(`[encrypt] ⏳ Encrypting '${input}' → '${output}' (CMS, AES-256-GCM)…`);
+    encrypt(recipient, input, output);
     console.log(`[encrypt] ✅ Wrote CMS envelope: ${output}`);
   } catch (err) {
-    if (fs.existsSync(tmp)) {
-      try {
-        fs.rmSync(tmp);
-      } catch (cleanupErr) {
-        console.warn('[encrypt] ⚠️ Failed to remove temporary file:', cleanupErr.message);
-      }
-    }
-    console.error('[encrypt] ❌ Encryption failed:', err.message);
+    console.error(`Error: ${err.message}`);
+    usage();
     process.exit(1);
   }
 }
 
 if (require.main === module) {
-  try {
-    main();
-  } catch (err) {
-    console.error('[encrypt] ❌ Unexpected error:', err.message);
-    process.exit(1);
-  }
+  main();
 }

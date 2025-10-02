@@ -101,7 +101,7 @@ function encryptWithForge(certificatePem, payloadBuffer) {
   envelope.content = forge.util.createBuffer(payloadBytes, 'binary');
 
   try {
-    envelope.encrypt({ symmetricAlgorithm: 'aes256' });
+    envelope.encrypt({ cipher: 'aes256' });
   } catch (err) {
     throw new Error(`Encryption failed (node-forge): ${err.message}`);
   }

@@ -96,33 +96,17 @@ function encryptWithForge(certificatePem, payloadBuffer) {
   }
 
   const payloadBytes = payloadBuffer.toString('binary');
-  const algorithms = [
-    {
-      label: 'AES-256-GCM',
-      options: { contentEncryptionAlgorithm: { name: 'aes256-GCM' } },
-    },
-    {
-      label: 'AES-256-CBC',
-      options: { contentEncryptionAlgorithm: 'aes256' },
-    },
-  ];
+  const envelope = forge.pkcs7.createEnvelopedData();
+  envelope.addRecipient(certificate);
+  envelope.content = forge.util.createBuffer(payloadBytes, 'binary');
 
-  let lastError;
-  for (const { label, options } of algorithms) {
-    const envelope = forge.pkcs7.createEnvelopedData();
-    envelope.addRecipient(certificate);
-    envelope.content = forge.util.createBuffer(payloadBytes, 'binary');
-
-    try {
-      envelope.encrypt(options);
-      return { envelope, algorithm: label };
-    } catch (err) {
-      lastError = err;
-    }
+  try {
+    envelope.encrypt({ symmetricAlgorithm: 'aes256' });
+  } catch (err) {
+    throw new Error(`Encryption failed (node-forge): ${err.message}`);
   }
 
-  const errorMessage = lastError && lastError.message ? lastError.message : 'unknown error';
-  throw new Error(`Encryption failed (node-forge): ${errorMessage}`);
+  return { envelope, algorithm: 'AES-256-CBC' };
 }
 
 function main() {

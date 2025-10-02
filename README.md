@@ -16,7 +16,7 @@ exchange files without standing up a heavyweight service.
 
 ```text
 .
-├── encrypt_file.js    # JavaScript example that shells out to OpenSSL
+├── encrypt_file.js    # JavaScript example that builds CMS with Node.js crypto
 ├── encrypt_file.sh    # Encrypt files for the secure inbox
 ├── decrypt_watch.sh   # Continuously decrypt new CMS envelopes
 ├── init_keys.sh       # Create RSA keys and a self-signed certificate
@@ -87,10 +87,10 @@ exchange files without standing up a heavyweight service.
    recipient's RSA certificate. The resulting `.cms` file can be dropped into
    the inbox for decryption.
 
-  Prefer JavaScript? A Node.js example that invokes the local OpenSSL CLI is
-  available in `encrypt_file.js`. It mirrors the shell script's flags so it
-  produces byte-for-byte compatible envelopes. Make sure `openssl` is available
-  on your PATH, then run:
+  Prefer JavaScript? `encrypt_file.js` shows how to assemble the same
+  AuthEnvelopedData structure directly from Node.js using the built-in `crypto`
+  module—no external OpenSSL calls required. Invoke the helper with the same
+  flags as the shell script:
 
    ```bash
    node encrypt_file.js \

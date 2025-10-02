@@ -1,0 +1,20 @@
+{
+  "name": "secure-file-drop",
+  "version": "1.0.0",
+  "description": "Secure File Drop helper scripts and examples.",
+  "main": "encrypt_file.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "echo \"No automated tests configured\""
+  },
+  "keywords": [
+    "cms",
+    "pkcs7",
+    "encryption"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "node-forge": "^1.3.1"
+  }
+}

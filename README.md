@@ -87,8 +87,9 @@ exchange files without standing up a heavyweight service.
    recipient's RSA certificate. The resulting `.cms` file can be dropped into
    the inbox for decryption.
 
-  Prefer JavaScript? A Node.js port that assembles the CMS structure directly
-  with the standard `crypto` library is provided in `encrypt_file.js`:
+  Prefer JavaScript? A Node.js example powered by the
+  [node-forge](https://github.com/digitalbazaar/forge) library lives in
+  `encrypt_file.js`. Install the dependency once (`npm install`) and run:
 
    ```bash
    node encrypt_file.js \

@@ -141,6 +141,20 @@ Additional behaviour worth noting:
 * Consider rotating the recipient certificate periodically by re-running
   `init_keys.sh` and distributing the new `cert.pem` to senders.
 
+## Appendix: Verifying CMS Envelopes
+
+To inspect the structure of a CMS envelope created by the helpers, use OpenSSL's
+`cms` command to print a decoded representation:
+
+```bash
+openssl cms -in message.cms -inform DER -cmsout -print
+```
+
+Replace `message.cms` with the path to the DER-formatted CMS file you want to
+verify. The output shows the envelope's metadata (algorithm selections,
+recipients, etc.) so you can confirm the message matches expectations without
+decrypting it.
+
 ## License
 
 This project is distributed under the MIT license. See [LICENSE](LICENSE) if

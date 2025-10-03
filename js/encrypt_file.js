@@ -7,21 +7,26 @@ const crypto = require('crypto');
 
 const OID = {
   AUTH_ENVELOPED_DATA: '1.2.840.113549.1.9.16.1.23',
+  ENVELOPED_DATA: '1.2.840.113549.1.7.3',
   DATA: '1.2.840.113549.1.7.1',
   RSA_ENCRYPTION: '1.2.840.113549.1.1.1',
-  AES_256_GCM: '2.16.840.1.101.3.4.1.46'
+  AES_256_GCM: '2.16.840.1.101.3.4.1.46',
+  AES_256_CBC: '2.16.840.1.101.3.4.1.42'
 };
 
+const SUPPORTED_ALGORITHMS = new Set(['aes-256-gcm', 'aes-256-cbc']);
+
 function usage() {
-  const script = path.basename(process.argv[1] || 'encrypt_file.js');
+  const script = path.basename(process.argv[1] || __filename);
   console.log(
     `Usage: ${script} -r CERT_PEM -i INPUT -o OUTPUT\n` +
-      'Encrypt INPUT into a CMS (DER) file using AES-256-GCM for content and RSA key transport.\n' +
+      'Encrypt INPUT into a CMS (DER) file with RSA key transport.\n' +
       '\n' +
       'Options:\n' +
       '  -r, --recipient  Recipient certificate (PEM, contains RSA public key)\n' +
       '  -i, --input      Input file to encrypt\n' +
       '  -o, --output     Output CMS file (e.g., file.cms)\n' +
+      '  -a, --algorithm  Encryption algorithm (aes-256-gcm | aes-256-cbc, default: aes-256-gcm)\n' +
       '  -h, --help       Show this message'
   );
 }
@@ -31,6 +36,7 @@ function parseArgs() {
   let recipient;
   let input;
   let output;
+  let algorithm = 'aes-256-gcm';
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -47,6 +53,23 @@ function parseArgs() {
       case '--output':
         output = args[++i];
         break;
+      case '-a':
+      case '--algorithm': {
+        const value = args[++i];
+        if (!value) {
+          console.error('Missing algorithm name');
+          usage();
+          process.exit(1);
+        }
+        const normalized = value.toLowerCase();
+        if (!SUPPORTED_ALGORITHMS.has(normalized)) {
+          console.error(`Unsupported algorithm: ${value}`);
+          usage();
+          process.exit(1);
+        }
+        algorithm = normalized;
+        break;
+      }
       case '-h':
       case '--help':
         usage();
@@ -59,7 +82,7 @@ function parseArgs() {
     }
   }
 
-  return { recipient, input, output };
+  return { recipient, input, output, algorithm };
 }
 
 function ensureReadableFile(label, filePath) {
@@ -119,10 +142,18 @@ function readASN1Element(buffer, offset) {
   };
 }
 
+function pemToDer(pem) {
+  const match = pem.match(/-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/i);
+  if (!match) {
+    throw new Error('Invalid certificate PEM');
+  }
+  const base64 = match[1].replace(/\s+/g, '');
+  return Buffer.from(base64, 'base64');
+}
+
 function extractIssuerAndSerial(pemPath) {
   const pem = fs.readFileSync(pemPath, 'utf8');
-  const x509 = new crypto.X509Certificate(pem);
-  const der = x509.raw;
+  const der = pemToDer(pem);
 
   const certSeq = readASN1Element(der, 0);
   if (certSeq.tag !== 0x30) {
@@ -257,16 +288,25 @@ function encodeGcmParameters(iv, tagLength) {
   return encodeSequence(components);
 }
 
-function encryptContent(plaintext) {
+function encryptContent(plaintext, algorithm) {
   const cek = crypto.randomBytes(32);
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', cek, iv, { authTagLength: 16 });
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return { cek, iv, ciphertext, tag };
+  if (algorithm === 'aes-256-gcm') {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', cek, iv, { authTagLength: 16 });
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return { cek, iv, ciphertext, tag };
+  }
+  if (algorithm === 'aes-256-cbc') {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', cek, iv);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    return { cek, iv, ciphertext };
+  }
+  throw new Error(`Unsupported algorithm: ${algorithm}`);
 }
 
-function buildCmsEnvelope(encryptionResult, certInfo) {
+function buildCmsEnvelope(encryptionResult, certInfo, algorithm) {
   const encryptedKey = crypto.publicEncrypt(
     {
       key: certInfo.pem,
@@ -288,31 +328,57 @@ function buildCmsEnvelope(encryptionResult, certInfo) {
     encodeOctetString(encryptedKey)
   ]);
 
-  const gcmParameters = encodeGcmParameters(encryptionResult.iv, 16);
+  if (algorithm === 'aes-256-gcm') {
+    const gcmParameters = encodeGcmParameters(encryptionResult.iv, 16);
 
-  const authEncryptedContentInfo = encodeSequence([
-    encodeOID(OID.DATA),
-    encodeSequence([
-      encodeOID(OID.AES_256_GCM),
-      gcmParameters
-    ]),
-    encodeImplicitOctetString(0, encryptionResult.ciphertext)
-  ]);
+    const authEncryptedContentInfo = encodeSequence([
+      encodeOID(OID.DATA),
+      encodeSequence([
+        encodeOID(OID.AES_256_GCM),
+        gcmParameters
+      ]),
+      encodeImplicitOctetString(0, encryptionResult.ciphertext)
+    ]);
 
-  const authEnvelopedData = encodeSequence([
-    encodeInteger(0),
-    encodeSet([recipientInfo]),
-    authEncryptedContentInfo,
-    encodeOctetString(encryptionResult.tag)
-  ]);
+    const authEnvelopedData = encodeSequence([
+      encodeInteger(0),
+      encodeSet([recipientInfo]),
+      authEncryptedContentInfo,
+      encodeOctetString(encryptionResult.tag)
+    ]);
 
-  return encodeSequence([
-    encodeOID(OID.AUTH_ENVELOPED_DATA),
-    encodeExplicit(0, authEnvelopedData)
-  ]);
+    return encodeSequence([
+      encodeOID(OID.AUTH_ENVELOPED_DATA),
+      encodeExplicit(0, authEnvelopedData)
+    ]);
+  }
+
+  if (algorithm === 'aes-256-cbc') {
+    const encryptedContentInfo = encodeSequence([
+      encodeOID(OID.DATA),
+      encodeSequence([
+        encodeOID(OID.AES_256_CBC),
+        encodeOctetString(encryptionResult.iv)
+      ]),
+      encodeImplicitOctetString(0, encryptionResult.ciphertext)
+    ]);
+
+    const envelopedData = encodeSequence([
+      encodeInteger(0),
+      encodeSet([recipientInfo]),
+      encryptedContentInfo
+    ]);
+
+    return encodeSequence([
+      encodeOID(OID.ENVELOPED_DATA),
+      encodeExplicit(0, envelopedData)
+    ]);
+  }
+
+  throw new Error(`Unsupported algorithm: ${algorithm}`);
 }
 
-function encrypt(recipientPath, inputPath, outputPath) {
+function encrypt(recipientPath, inputPath, outputPath, algorithm) {
   ensureReadableFile('recipient certificate', recipientPath);
   ensureReadableFile('input file', inputPath);
   if (!outputPath) {
@@ -321,8 +387,8 @@ function encrypt(recipientPath, inputPath, outputPath) {
 
   const certInfo = extractIssuerAndSerial(recipientPath);
   const plaintext = fs.readFileSync(inputPath);
-  const encryptionResult = encryptContent(plaintext);
-  const cmsDer = buildCmsEnvelope(encryptionResult, certInfo);
+  const encryptionResult = encryptContent(plaintext, algorithm);
+  const cmsDer = buildCmsEnvelope(encryptionResult, certInfo, algorithm);
 
   const tmpPath = `${outputPath}.part`;
   fs.writeFileSync(tmpPath, cmsDer);
@@ -330,11 +396,11 @@ function encrypt(recipientPath, inputPath, outputPath) {
 }
 
 function main() {
-  const { recipient, input, output } = parseArgs();
+  const { recipient, input, output, algorithm } = parseArgs();
 
   try {
-    console.log(`[encrypt] ⏳ Encrypting '${input}' → '${output}' (CMS, AES-256-GCM)…`);
-    encrypt(recipient, input, output);
+    console.log(`[encrypt] ⏳ Encrypting '${input}' → '${output}' (CMS, ${algorithm.toUpperCase()})…`);
+    encrypt(recipient, input, output, algorithm);
     console.log(`[encrypt] ✅ Wrote CMS envelope: ${output}`);
   } catch (err) {
     console.error(`Error: ${err.message}`);

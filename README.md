@@ -16,7 +16,8 @@ exchange files without standing up a heavyweight service.
 
 ```text
 .
-├── encrypt_file.js    # JavaScript example that builds CMS with Node.js crypto
+├── js/
+│   └── encrypt_file.js  # JavaScript example that builds CMS with Node.js crypto
 ├── encrypt_file.sh    # Encrypt files for the secure inbox
 ├── decrypt_watch.sh   # Continuously decrypt new CMS envelopes
 ├── init_keys.sh       # Create RSA keys and a self-signed certificate
@@ -83,17 +84,21 @@ exchange files without standing up a heavyweight service.
      -o secret.pdf.cms
    ```
 
-   The script produces a DER-formatted CMS envelope using AES-256-GCM and the
-   recipient's RSA certificate. The resulting `.cms` file can be dropped into
-   the inbox for decryption.
+  The script produces a DER-formatted CMS envelope using AES-256-GCM and the
+  recipient's RSA certificate. It first performs a no-op encryption against the
+  provided certificate to verify that the installed OpenSSL actually supports
+  CMS AES-GCM. If that probe fails (for example, with OpenSSL 1.1.1k on some
+  platforms), the helper automatically falls back to AES-256-CBC so that
+  encryption still succeeds. The resulting `.cms` file can be dropped into the
+  inbox for decryption.
 
-  Prefer JavaScript? `encrypt_file.js` shows how to assemble the same
+  Prefer JavaScript? `js/encrypt_file.js` shows how to assemble the same
   AuthEnvelopedData structure directly from Node.js using the built-in `crypto`
   module—no external OpenSSL calls required. Invoke the helper with the same
   flags as the shell script:
 
    ```bash
-   node encrypt_file.js \
+   node js/encrypt_file.js \
      -r /path/to/recipient_cert.pem \
      -i secret.pdf \
      -o secret.pdf.cms

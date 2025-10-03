@@ -36,9 +36,24 @@ done
 tmp="${OUT}.part"
 
 supports_gcm() {
-  local tmpfile
-  tmpfile=$(mktemp) || return 1
+  local cipher_list tmpfile
 
+  # OpenSSL 3.x exposes algorithm availability via `list -cipher-algorithms`.
+  if cipher_list=$(openssl list -cipher-algorithms 2>/dev/null); then
+    if grep -qiE '(^|[[:space:]])aes-256-gcm($|[[:space:]])' <<<"${cipher_list}"; then
+      return 0
+    fi
+  fi
+
+  # OpenSSL 1.1.1 exposes cipher names via `list -cipher-commands`.
+  if cipher_list=$(openssl list -cipher-commands 2>/dev/null); then
+    if grep -qiE '(^|[[:space:]])aes-256-gcm($|[[:space:]])' <<<"${cipher_list}"; then
+      return 0
+    fi
+  fi
+
+  # As a final fallback, attempt a tiny CMS envelope to confirm support.
+  tmpfile=$(mktemp) || return 1
   if openssl cms -encrypt \
     -binary -stream \
     -aes-256-gcm \

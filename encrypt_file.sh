@@ -34,16 +34,44 @@ done
 [ -n "${OUT}" ] || { echo "ERR: output path missing"; exit 2; }
 
 tmp="${OUT}.part"
-echo "[encrypt] ⏳ Encrypting '${IN}' → '${OUT}' (CMS, AES-256-GCM)…"
+
+select_cipher() {
+  local list_output
+
+  if list_output=$(openssl list -cipher-algorithms 2>/dev/null); then
+    if grep -Eqi 'aes[-_]?256[-_]?gcm' <<<"${list_output}"; then
+      return 0
+    fi
+  fi
+
+  if list_output=$(openssl list-cipher-algorithms 2>/dev/null); then
+    if grep -Eqi 'aes[-_]?256[-_]?gcm' <<<"${list_output}"; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+CMS_CIPHER=(-aes-256-gcm)
+CIPHER_LABEL="AES-256-GCM"
+if ! select_cipher; then
+  echo "[encrypt] ⚠️ OpenSSL lacks AES-256-GCM support; falling back to AES-256-CBC." >&2
+  CMS_CIPHER=(-aes256)
+  CIPHER_LABEL="AES-256-CBC"
+  echo "[encrypt] ℹ️ Resulting envelope will not provide built-in authentication." >&2
+fi
+
+echo "[encrypt] ⏳ Encrypting '${IN}' → '${OUT}' (CMS, ${CIPHER_LABEL})…"
 
 # -binary preserves exact bytes; -stream handles large files with low memory.
 openssl cms -encrypt \
   -binary -stream \
-  -aes-256-gcm \
+  "${CMS_CIPHER[@]}" \
   -in  "${IN}" \
   -out "${tmp}" \
   -outform DER \
-  "${RECIP}"
+  -recip "${RECIP}"
 
 # Atomic move
 mv -f -- "${tmp}" "${OUT}"

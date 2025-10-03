@@ -35,27 +35,28 @@ done
 
 tmp="${OUT}.part"
 
-select_cipher() {
-  local list_output
+supports_gcm() {
+  local tmpfile
+  tmpfile=$(mktemp) || return 1
 
-  if list_output=$(openssl list -cipher-algorithms 2>/dev/null); then
-    if grep -Eqi 'aes[-_]?256[-_]?gcm' <<<"${list_output}"; then
-      return 0
-    fi
+  if openssl cms -encrypt \
+    -binary -stream \
+    -aes-256-gcm \
+    -in /dev/null \
+    -out "${tmpfile}" \
+    -outform DER \
+    -recip "${RECIP}" >/dev/null 2>&1; then
+    rm -f -- "${tmpfile}"
+    return 0
   fi
 
-  if list_output=$(openssl list-cipher-algorithms 2>/dev/null); then
-    if grep -Eqi 'aes[-_]?256[-_]?gcm' <<<"${list_output}"; then
-      return 0
-    fi
-  fi
-
+  rm -f -- "${tmpfile}"
   return 1
 }
 
 CMS_CIPHER=(-aes-256-gcm)
 CIPHER_LABEL="AES-256-GCM"
-if ! select_cipher; then
+if ! supports_gcm; then
   echo "[encrypt] ⚠️ OpenSSL lacks AES-256-GCM support; falling back to AES-256-CBC." >&2
   CMS_CIPHER=(-aes256)
   CIPHER_LABEL="AES-256-CBC"

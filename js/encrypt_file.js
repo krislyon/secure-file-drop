@@ -17,7 +17,7 @@ const OID = {
 const SUPPORTED_ALGORITHMS = new Set(['aes-256-gcm', 'aes-256-cbc']);
 
 function usage() {
-  const script = path.basename(process.argv[1] || 'encrypt_file.js');
+  const script = path.basename(process.argv[1] || __filename);
   console.log(
     `Usage: ${script} -r CERT_PEM -i INPUT -o OUTPUT\n` +
       'Encrypt INPUT into a CMS (DER) file with RSA key transport.\n' +
@@ -142,10 +142,18 @@ function readASN1Element(buffer, offset) {
   };
 }
 
+function pemToDer(pem) {
+  const match = pem.match(/-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/i);
+  if (!match) {
+    throw new Error('Invalid certificate PEM');
+  }
+  const base64 = match[1].replace(/\s+/g, '');
+  return Buffer.from(base64, 'base64');
+}
+
 function extractIssuerAndSerial(pemPath) {
   const pem = fs.readFileSync(pemPath, 'utf8');
-  const x509 = new crypto.X509Certificate(pem);
-  const der = x509.raw;
+  const der = pemToDer(pem);
 
   const certSeq = readASN1Element(der, 0);
   if (certSeq.tag !== 0x30) {

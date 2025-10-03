@@ -2,7 +2,7 @@
   "name": "secure-file-drop",
   "version": "1.0.0",
   "description": "Secure File Drop helper scripts and examples.",
-  "main": "encrypt_file.js",
+  "main": "js/encrypt_file.js",
   "type": "commonjs",
   "scripts": {
     "test": "echo \"No automated tests configured\""

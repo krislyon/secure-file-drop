@@ -47,6 +47,28 @@ exchange files without standing up a heavyweight service.
    certificate in the target directory. Keep the passphrase safe—it is required
    when decrypting files.
 
+### What `init_keys.sh` generates
+
+`init_keys.sh` wraps a handful of OpenSSL commands so you end up with modern,
+defence-in-depth defaults without memorising the flags:
+
+* **Private key (`privkey_encrypted.pk8`)** – a 3,072-bit RSA key produced with
+  `openssl genpkey`. RSA-3072 aligns with contemporary NIST guidance and offers
+  long-term security against well-funded adversaries.
+* **At-rest protection** – the private key is immediately re-encoded as an
+  encrypted PKCS#8 structure using AES-256-CBC with 200,000 PBKDF2 iterations.
+  This slows offline brute-force attempts if the file is ever exfiltrated. The
+  script insists on a non-empty passphrase and never leaves it on disk.
+* **Public key (`pubkey.pem`)** – exported for inspection or distribution where
+  a bare public key is preferred over a certificate.
+* **Self-signed certificate (`cert.pem`)** – valid for 10 years (3,650 days)
+  with the Common Name you supply on invocation. This certificate is what
+  senders use when encrypting CMS envelopes.
+
+You can safely regenerate the bundle in a new output directory whenever you
+need to rotate keys—just re-share the resulting `cert.pem` and securely archive
+the passphrase and encrypted private key.
+
 2. **Provision the secure file-drop layout**
 
    ```bash

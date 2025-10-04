@@ -40,14 +40,14 @@ supports_gcm() {
 
   # OpenSSL 3.x exposes algorithm availability via `list -cipher-algorithms`.
   if cipher_list=$(openssl list -cipher-algorithms 2>/dev/null); then
-    if grep -qiE '(^|[[:space:]])aes-256-gcm($|[[:space:]])' <<<"${cipher_list}"; then
+    if grep -qi 'aes-256-gcm' <<<"${cipher_list}"; then
       return 0
     fi
   fi
 
   # OpenSSL 1.1.1 exposes cipher names via `list -cipher-commands`.
   if cipher_list=$(openssl list -cipher-commands 2>/dev/null); then
-    if grep -qiE '(^|[[:space:]])aes-256-gcm($|[[:space:]])' <<<"${cipher_list}"; then
+    if grep -qi 'aes-256-gcm' <<<"${cipher_list}"; then
       return 0
     fi
   fi

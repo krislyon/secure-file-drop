@@ -15,6 +15,10 @@ Notes:
 EOF
 }
 
+log()   { printf '%s %s\n' "$(date -Iseconds)" "$*"; }
+warn()  { log "WARN: $*"; }
+error() { log "ERR: $*"; }
+
 RECIP=""
 IN=""
 OUT=""
@@ -29,9 +33,9 @@ while getopts ":r:i:o:h" opt; do
   esac
 done
 
-[ -n "${RECIP}" ] && [ -f "${RECIP}" ] || { echo "ERR: recipient cert missing"; exit 2; }
-[ -n "${IN}" ] && [ -f "${IN}" ] || { echo "ERR: input file missing"; exit 2; }
-[ -n "${OUT}" ] || { echo "ERR: output path missing"; exit 2; }
+[ -n "${RECIP}" ] && [ -f "${RECIP}" ] || { error "[encrypt] recipient cert missing"; exit 2; }
+[ -n "${IN}" ] && [ -f "${IN}" ] || { error "[encrypt] input file missing"; exit 2; }
+[ -n "${OUT}" ] || { error "[encrypt] output path missing"; exit 2; }
 
 tmp="${OUT}.part"
 
@@ -72,13 +76,14 @@ supports_gcm() {
 CMS_CIPHER=(-aes-256-gcm)
 CIPHER_LABEL="AES-256-GCM"
 if ! supports_gcm; then
-  echo "[encrypt] ⚠️ OpenSSL lacks AES-256-GCM support; falling back to AES-256-CBC." >&2
+  warn "[encrypt] ⚠️ OpenSSL lacks AES-256-GCM support; falling back to AES-256-CBC."
   CMS_CIPHER=(-aes256)
   CIPHER_LABEL="AES-256-CBC"
-  echo "[encrypt] ℹ️ Resulting envelope will not provide built-in authentication." >&2
+  warn "[encrypt] ℹ️ Resulting envelope will not provide built-in authentication."
 fi
 
-echo "[encrypt] ⏳ Encrypting '${IN}' → '${OUT}' (CMS, ${CIPHER_LABEL})…"
+log "[encrypt] ⏳ Encrypting '${IN}' → '${OUT}' (CMS, ${CIPHER_LABEL})…"
+log "[encrypt] 🔐 md5sum $(md5sum -- "${IN}")"
 
 # -binary preserves exact bytes; -stream handles large files with low memory.
 openssl cms -encrypt \
@@ -91,4 +96,4 @@ openssl cms -encrypt \
 
 # Atomic move
 mv -f -- "${tmp}" "${OUT}"
-echo "[encrypt] ✅ Wrote CMS envelope: ${OUT}"
+log "[encrypt] ✅ Wrote CMS envelope: ${OUT}"
